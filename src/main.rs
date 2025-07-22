@@ -3,51 +3,24 @@ use std::net::{Ipv4Addr, UdpSocket};
 
 fn main() -> Result<(), Error> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 68))?;
-    println!("Initialized socket");
     socket.set_broadcast(true)?;
-    println!("Allow broadcast");
 
-    // Up til options is 236 bytes
-    let mut dhcp_req: [u8; 241] = [0; 241];
-    // op
-    dhcp_req[0] = 1;
-    // htype
-    dhcp_req[1] = 1;
-    // hlen
-    dhcp_req[2] = 1;
-    // hops set to 0 by client
-    // dhcp_req[3] = ..
-    // xid
-    dhcp_req[4] = 1;
-    // secs
-    // dhcp_req[8..10] = ..
-    // flags. broadcast option
-    dhcp_req[10] = 1 << 7;
-    // ciaddr
-    // yiaddr
-    // siaddr
-    // giaddr
-    // chaddr
-    // sname
-    // file
-    // options
-    // magic cookie
-    dhcp_req[236] = 99;
-    dhcp_req[237] = 130;
-    dhcp_req[238] = 83;
-    dhcp_req[239] = 99;
-    // "end option"
-    dhcp_req[240] = 0xFF;
+    let mut buf = [0; 576];
+    let init = DhcpMsg::client_init([1, 2, 3, 4]);
+    init.print();
 
-    println!("Sending message");
-    let amt_sent = socket.send_to(&dhcp_req, (Ipv4Addr::BROADCAST, 67))?;
+    let msg_size = init.to_bytes(&mut buf);
+
+    println!("Sending message of size {}", msg_size);
+    let amt_sent = socket.send_to(&buf, (Ipv4Addr::BROADCAST, 67))?;
     println!("Sent {} bytes", amt_sent);
-    print_dhcp_msg(241, &dhcp_req);
 
-    let mut recv_buf: [u8; 512] = [0; 512];
+    let mut recv_buf= [0; 576];
     let (amt_recv, from_addr) = socket.recv_from(&mut recv_buf)?;
     println!("Received {} bytes from {}", amt_recv, from_addr);
-    print_dhcp_msg(amt_recv, &recv_buf);
+
+    let response = DhcpMsg::from_bytes(amt_recv, &recv_buf);
+    response.print();
 
     Ok(())
 }
@@ -79,20 +52,128 @@ fn main() -> Result<(), Error> {
    |                          options (variable)                   |
    +---------------------------------------------------------------+
 */
-// todo: make struct for dhcp message
-fn print_dhcp_msg(amt: usize, buf: &[u8]) {
-    println!(
-        "op {:02X} | htype {:02X} | hlen {:02X} | hops {:02X}",
-        buf[0], buf[1], buf[2], buf[3]
-    );
-    println!("xid {:02X?}", &buf[4..8]);
-    println!("secs {:02X?} | flags {:02X?}", &buf[8..10], &buf[10..12]);
-    println!("ciaddr {:02X?}", &buf[12..16]);
-    println!("yiaddr {:02X?}", &buf[16..20]);
-    println!("siaddr {:02X?}", &buf[20..24]);
-    println!("giaddr {:02X?}", &buf[24..28]);
-    println!("chaddr {:02X?}", &buf[28..44]);
-    println!("sname {:02X?}", &buf[44..108]);
-    println!("file {:02X?}", &buf[108..236]);
-    println!("options {:02X?}", &buf[236..amt]);
+#[derive(Debug)]
+struct DhcpMsg {
+    op: u8,
+    htype: u8,
+    hlen: u8,
+    hops: u8,
+    xid: [u8; 4],
+    secs: [u8; 2],
+    flags: [u8; 2],
+    ciaddr: [u8; 4],
+    yiaddr: [u8; 4],
+    siaddr: [u8; 4],
+    giaddr: [u8; 4],
+    chaddr: [u8; 16],
+    sname: [u8; 64],
+    file: [u8; 128],
+    options: [u8; 340],
+    options_len: usize,
+}
+
+impl DhcpMsg {
+    // Up til options is 236 bytes
+    fn client_init(xid: [u8; 4]) -> Self {
+        let mut options = [0; 340];
+        // magic cookie
+        options[0] = 99;
+        options[1] = 130;
+        options[2] = 83;
+        options[3] = 99;
+        // end
+        options[4] = 255;
+
+        DhcpMsg {
+            op: 1,
+            htype: 1, // 10 mb ethernet
+            hlen: 1,  // 6 bytes
+            hops: 0,
+            xid,
+            secs: [0, 0],
+            // broadcast
+            flags: [1 << 7, 0],
+            ciaddr: [0; 4],
+            yiaddr: [0; 4],
+            siaddr: [0; 4],
+            giaddr: [0; 4],
+            chaddr: [0; 16],
+            sname: [0; 64],
+            file: [0; 128],
+            options: options,
+            options_len: 5,
+        }
+    }
+
+    fn from_bytes(amt: usize, buf: &[u8]) -> Self {
+        let mut xid = [0; 4];
+        let mut secs = [0, 0];
+        let mut flags = [1 << 7, 0];
+        let mut ciaddr = [0; 4];
+        let mut yiaddr = [0; 4];
+        let mut siaddr = [0; 4];
+        let mut giaddr = [0; 4];
+        let mut chaddr = [0; 16];
+        let mut sname = [0; 64];
+        let mut file = [0; 128];
+        let mut options = [0; 340];
+        let options_len = amt - 236;
+
+        xid.copy_from_slice(&buf[4..8]);
+        secs.copy_from_slice(&buf[8..10]);
+        flags.copy_from_slice(&buf[10..12]);
+        ciaddr.copy_from_slice(&buf[12..16]);
+        yiaddr.copy_from_slice(&buf[16..20]);
+        siaddr.copy_from_slice(&buf[20..24]);
+        giaddr.copy_from_slice(&buf[24..28]);
+        chaddr.copy_from_slice(&buf[28..44]);
+        sname.copy_from_slice(&buf[44..108]);
+        file.copy_from_slice(&buf[108..236]);
+        options[0..options_len].copy_from_slice(&buf[236..236 + options_len]);
+
+        DhcpMsg {
+            op: buf[0],
+            htype: buf[1],
+            hlen: buf[2],
+            hops: buf[3],
+            xid,
+            secs,
+            flags,
+            ciaddr,
+            yiaddr,
+            siaddr,
+            giaddr,
+            chaddr,
+            sname,
+            file,
+            options,
+            options_len,
+        }
+    }
+
+    pub fn to_bytes(&self, buf: &mut [u8]) -> usize {
+        buf[0] = self.op;
+        buf[1] = self.htype;
+        buf[2] = self.hlen;
+        buf[3] = self.hops;
+
+        buf[4..8].copy_from_slice(&self.xid);
+        buf[8..10].copy_from_slice(&self.secs);
+        buf[10..12].copy_from_slice(&self.flags);
+        buf[12..16].copy_from_slice(&self.ciaddr);
+        buf[16..20].copy_from_slice(&self.yiaddr);
+        buf[20..24].copy_from_slice(&self.siaddr);
+        buf[24..28].copy_from_slice(&self.giaddr);
+        buf[28..44].copy_from_slice(&self.chaddr);
+        buf[44..108].copy_from_slice(&self.sname);
+        buf[108..236].copy_from_slice(&self.file);
+
+        let options_amt = self.options_len;
+        buf[236..236 + options_amt].copy_from_slice(&self.options[0..options_amt]);
+        236 + options_amt
+    }
+
+    fn print(&self) {
+        println!("{:?}", self);
+    }
 }
